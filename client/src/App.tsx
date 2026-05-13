@@ -65,6 +65,7 @@ export default function App(): JSX.Element {
   const lastAutoAssignRef = useRef(0);
   const lastSelfClaimRef = useRef(0);
   const lastAmbiguousResetRef = useRef(0);
+  const lastForcedDominatingBySpeakerRef = useRef<Record<string, number>>({});
   const activeSpeakerRef = useRef<string | null>(null);
   const participantsRef = useRef<Participant[]>([]);
   const realtimeSpeechTimeoutRef = useRef<number | null>(null);
@@ -397,10 +398,23 @@ export default function App(): JSX.Element {
         rms: effectiveSpeaking ? Math.max(micRms, DETECTOR_SPEAKING_RMS) : micRms,
         transcriptText: recentTranscript
       });
+      const now = Date.now();
+      const progressMs = detectorRef.current.getYapProgressMs(effectiveSpeakerId, now);
       if (!effectiveSpeaking) {
         setYapProgressMs(0);
       } else {
-        setYapProgressMs(detectorRef.current.getYapProgressMs(effectiveSpeakerId, Date.now()));
+        setYapProgressMs(progressMs);
+      }
+
+      // Hard fail-safe: even if transcript/realtime events are flaky, a visible
+      // 10s continuous YAP from live mic activity must still trigger a bounce.
+      if (effectiveSpeakerId && effectiveSpeaking && progressMs >= YAP_TARGET_MS) {
+        const last = lastForcedDominatingBySpeakerRef.current[effectiveSpeakerId] ?? 0;
+        if (now - last >= 12_000) {
+          lastForcedDominatingBySpeakerRef.current[effectiveSpeakerId] = now;
+          fireViolation("dominating", `${(progressMs / 1000).toFixed(1)}s nonstop yap`, effectiveSpeakerId);
+          return;
+        }
       }
 
       if (!violation) return;
