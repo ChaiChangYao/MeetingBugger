@@ -42,6 +42,7 @@ export default function App(): JSX.Element {
   const [micPitchHz, setMicPitchHz] = useState<number | null>(null);
   const [micSpeaking, setMicSpeaking] = useState(false);
   const [realtimeSpeaking, setRealtimeSpeaking] = useState(false);
+  const [sustainedMicEnergyDetected, setSustainedMicEnergyDetected] = useState(false);
   const [micReady, setMicReady] = useState(false);
   const [isRecordingVoice, setIsRecordingVoice] = useState(false);
   const [meterError, setMeterError] = useState("");
@@ -66,6 +67,7 @@ export default function App(): JSX.Element {
   const activeSpeakerRef = useRef<string | null>(null);
   const participantsRef = useRef<Participant[]>([]);
   const realtimeSpeechTimeoutRef = useRef<number | null>(null);
+  const micEnergySinceRef = useRef<number | null>(null);
 
   const detectorRef = useRef(new ViolationDetector());
   const soundRef = useRef(createSoundController());
@@ -94,7 +96,7 @@ export default function App(): JSX.Element {
   const activeSpeakerId = roomState?.activeSpeakerId ?? null;
   const liveVolumePct = Math.min(100, Math.round((micRms / Math.max(0.006, sensitivity * 0.75)) * 100));
   const speechEnergyDetected = isRecordingVoice && micRms >= Math.max(0.008, sensitivity * 0.35);
-  const effectiveSpeaking = micSpeaking || realtimeSpeaking || speechEnergyDetected;
+  const effectiveSpeaking = micSpeaking || realtimeSpeaking || sustainedMicEnergyDetected;
   const overlapBlocksYap = multipleSpeakersLikely && participants.length >= 2;
   const leaderboardParticipants = participants.map((participant) => {
     const baseline = leaderboardBaselineById[participant.id];
@@ -277,6 +279,23 @@ export default function App(): JSX.Element {
   useEffect(() => {
     meterRef.current.setSensitivity(sensitivity);
   }, [sensitivity]);
+
+  useEffect(() => {
+    if (!speechEnergyDetected) {
+      micEnergySinceRef.current = null;
+      setSustainedMicEnergyDetected(false);
+      return;
+    }
+
+    if (!micEnergySinceRef.current) {
+      micEnergySinceRef.current = Date.now();
+      return;
+    }
+
+    if (Date.now() - micEnergySinceRef.current >= 300) {
+      setSustainedMicEnergyDetected(true);
+    }
+  }, [speechEnergyDetected]);
 
   useEffect(() => {
     setMicPeakPct((prev) => (liveVolumePct > prev ? liveVolumePct : prev));
@@ -504,10 +523,12 @@ export default function App(): JSX.Element {
     setYapProgressMs(0);
     setMicSpeaking(false);
     setRealtimeSpeaking(false);
+    setSustainedMicEnergyDetected(false);
     setMultipleSpeakersLikely(false);
     setMicPeakPct(0);
     setMicRms(0);
     recentPitchSamplesRef.current = [];
+    micEnergySinceRef.current = null;
     pitchProfilesRef.current = {};
     setMicReady(false);
     setIsRecordingVoice(false);
@@ -705,6 +726,10 @@ export default function App(): JSX.Element {
           </p>
           <p className="text-xs font-bold">
             {speechEnergyDetected ? "Live mic energy detected" : "Live mic energy low"}
+          </p>
+          <p className="text-xs font-bold">
+            debug: realtimeSpeaking={String(realtimeSpeaking)} micSpeaking={String(micSpeaking)} speechEnergyDetected=
+            {String(speechEnergyDetected)} effectiveSpeaking={String(effectiveSpeaking)}
           </p>
           {micRms > sensitivity && !activeSpeakerId ? (
             <p className="text-xs font-bold text-red-700">Mystery Yapper detected: assign a speaker.</p>

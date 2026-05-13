@@ -34,7 +34,16 @@ export class RealtimeVoiceController {
   private async fetchToken(): Promise<RealtimeTokenResponse> {
     const response = await fetch("/api/realtime-token");
     if (!response.ok) {
-      throw new Error("Realtime token unavailable");
+      let detail = `HTTP ${response.status}`;
+      try {
+        const body = (await response.json()) as { error?: string };
+        if (body?.error) {
+          detail = body.error;
+        }
+      } catch {
+        // Ignore parse failures and use status fallback.
+      }
+      throw new Error(`Realtime token unavailable: ${detail}`);
     }
     return (await response.json()) as RealtimeTokenResponse;
   }
@@ -139,9 +148,10 @@ export class RealtimeVoiceController {
       await this.peerConnection.setRemoteDescription({ type: "answer", sdp: answerSdp });
       this.connected = true;
       this.options.onStatus("Realtime voice connected");
-    } catch {
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : "Unknown realtime failure";
       this.fallbackMode = true;
-      this.options.onStatus("Voice fallback mode");
+      this.options.onStatus(`Voice fallback mode: ${reason}`);
     }
   }
 
