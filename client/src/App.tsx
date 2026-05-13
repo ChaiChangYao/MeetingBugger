@@ -54,9 +54,13 @@ export default function App(): JSX.Element {
   const [demoParticipants, setDemoParticipants] = useState<Participant[]>([]);
   const [autoSpeakerGuess, setAutoSpeakerGuess] = useState(true);
   const [micPeakPct, setMicPeakPct] = useState(0);
+  const [multipleSpeakersLikely, setMultipleSpeakersLikely] = useState(false);
   const statsTickRef = useRef(0);
   const pitchProfilesRef = useRef<Record<string, { avgHz: number; samples: number }>>({});
+  const recentPitchSamplesRef = useRef<number[]>([]);
   const lastAutoAssignRef = useRef(0);
+  const lastSelfClaimRef = useRef(0);
+  const lastAmbiguousResetRef = useRef(0);
   const activeSpeakerRef = useRef<string | null>(null);
   const participantsRef = useRef<Participant[]>([]);
 
@@ -91,6 +95,10 @@ export default function App(): JSX.Element {
     activeSpeakerRef.current = activeSpeakerId;
     participantsRef.current = participants;
   }, [activeSpeakerId, participants]);
+
+  useEffect(() => {
+    detectorRef.current.onActiveSpeakerChanged(activeSpeakerId, Date.now());
+  }, [activeSpeakerId]);
 
   const selectSpeaker = (speakerId: string | null): void => {
     if (roomName) {
@@ -209,6 +217,20 @@ export default function App(): JSX.Element {
   }, [activeSpeakerId, micPitchHz, micSpeaking]);
 
   useEffect(() => {
+    if (!micPitchHz || !micSpeaking) return;
+    const next = [...recentPitchSamplesRef.current, micPitchHz].slice(-12);
+    recentPitchSamplesRef.current = next;
+    if (next.length < 6) {
+      setMultipleSpeakersLikely(false);
+      return;
+    }
+    const avg = next.reduce((sum, value) => sum + value, 0) / next.length;
+    const variance = next.reduce((sum, value) => sum + (value - avg) ** 2, 0) / next.length;
+    const stdDev = Math.sqrt(variance);
+    setMultipleSpeakersLikely(stdDev > 36);
+  }, [micPitchHz, micSpeaking]);
+
+  useEffect(() => {
     if (!autoSpeakerGuess || !micSpeaking || !micPitchHz || participants.length < 2) return;
     const now = Date.now();
     if (now - lastAutoAssignRef.current < 1200) return;
@@ -231,23 +253,45 @@ export default function App(): JSX.Element {
   }, [activeSpeakerId, autoSpeakerGuess, micPitchHz, micSpeaking, participants]);
 
   useEffect(() => {
+    if (!isRecordingVoice || !micSpeaking || activeSpeakerId || !myParticipant) return;
+    const now = Date.now();
+    if (now - lastSelfClaimRef.current < 1200) return;
+    lastSelfClaimRef.current = now;
+    selectSpeaker(myParticipant.id);
+  }, [activeSpeakerId, isRecordingVoice, micSpeaking, myParticipant]);
+
+  useEffect(() => {
+    if (!multipleSpeakersLikely || !activeSpeakerId) return;
+    const now = Date.now();
+    if (now - lastAmbiguousResetRef.current < 1200) return;
+    lastAmbiguousResetRef.current = now;
+    detectorRef.current.resetCurrentYap(activeSpeakerId, now);
+    setYapProgressMs(0);
+  }, [activeSpeakerId, multipleSpeakersLikely]);
+
+  useEffect(() => {
     const id = window.setInterval(() => {
       const recentTranscript = transcript.slice(-3).map((line) => line.text).join(" ");
       const claiming = participants.some((participant) => participant.id === activeSpeakerId && participant.isClaimingSpeaker);
+      if (multipleSpeakersLikely) {
+        setYapProgressMs(0);
+        return;
+      }
+      const effectiveSpeakerId = activeSpeakerId;
       const violation = detectorRef.current.evaluate({
         now: Date.now(),
-        activeSpeakerId,
+        activeSpeakerId: effectiveSpeakerId,
         isSpeakerClaiming: claiming,
         rms: micRms,
         transcriptText: recentTranscript
       });
-      setYapProgressMs(detectorRef.current.getYapProgressMs(activeSpeakerId, Date.now()));
+      setYapProgressMs(detectorRef.current.getYapProgressMs(effectiveSpeakerId, Date.now()));
 
       if (!violation) return;
       fireViolation(violation.type, violation.reason, violation.speakerId);
     }, 200);
     return () => window.clearInterval(id);
-  }, [activeSpeakerId, micRms, participants, transcript]);
+  }, [activeSpeakerId, micRms, multipleSpeakersLikely, participants, transcript]);
 
   useEffect(() => {
     if (!activeSpeakerId || micRms < sensitivity) return;
@@ -355,6 +399,7 @@ export default function App(): JSX.Element {
 
   const stopHostMic = (): void => {
     meterRef.current.stop();
+    voiceRef.current?.disconnect();
     setMicReady(false);
     setIsRecordingVoice(false);
   };
@@ -429,6 +474,7 @@ export default function App(): JSX.Element {
       <p className="status-line">
         Voice capture: {isRecordingVoice ? "RECORDING VOICE" : "NOT RECORDING VOICE"}
       </p>
+      {multipleSpeakersLikely ? <p className="status-line">Multiple voices detected: YAP-O-METER reset</p> : null}
 
       <section className="control-row">
         <button className="btn" onClick={toggleHostMic}>

@@ -69,6 +69,7 @@ export class ViolationDetector {
   private config: DetectorConfig;
   private windows = new Map<string, SpeakerWindow>();
   private cooldowns = new Map<string, number>();
+  private lastActiveSpeakerId: string | null = null;
 
   constructor(config: Partial<DetectorConfig> = {}) {
     this.config = { ...defaults, ...config };
@@ -94,8 +95,31 @@ export class ViolationDetector {
     return created;
   }
 
+  private resetWindow(speakerId: string, now: number): void {
+    this.windows.set(speakerId, {
+      speakStartMs: now,
+      lastVoiceMs: now,
+      assignedStartMs: now
+    });
+  }
+
+  onActiveSpeakerChanged(nextSpeakerId: string | null, now: number): void {
+    if (nextSpeakerId !== this.lastActiveSpeakerId) {
+      if (nextSpeakerId) {
+        this.resetWindow(nextSpeakerId, now);
+      }
+      this.lastActiveSpeakerId = nextSpeakerId;
+    }
+  }
+
+  resetCurrentYap(speakerId: string | null, now: number): void {
+    if (!speakerId) return;
+    this.resetWindow(speakerId, now);
+  }
+
   evaluate(frame: DetectorFrame): DetectorViolation | null {
     const { now, activeSpeakerId, rms, transcriptText, isSpeakerClaiming } = frame;
+    this.onActiveSpeakerChanged(activeSpeakerId, now);
     const isSpeaking = rms >= this.config.speakingThreshold;
     const words = countWords(transcriptText);
     const sparseTranscript = words < this.config.sparseWordsThreshold;
