@@ -1,3 +1,4 @@
+import { RealtimeAgent, RealtimeSession } from "@openai/agents/realtime";
 import { getRandomBouncerLine } from "./bouncerLines";
 import { ViolationType } from "./types";
 
@@ -16,9 +17,7 @@ interface VoiceOptions {
 }
 
 export class RealtimeVoiceController {
-  private peerConnection: RTCPeerConnection | null = null;
-  private dataChannel: RTCDataChannel | null = null;
-  private audioEl: HTMLAudioElement | null = null;
+  private session: RealtimeSession | null = null;
   private fallbackMode = false;
   private options: VoiceOptions;
   private connected = false;
@@ -59,95 +58,55 @@ export class RealtimeVoiceController {
         throw new Error("Missing client secret");
       }
 
-      // Ephemeral token flow:
-      // 1) Browser asks our backend for a short-lived client secret.
-      // 2) Backend uses OPENAI_API_KEY server-side to mint that secret.
-      // 3) Browser only ever sees this temporary secret, never the real API key.
-      this.peerConnection = new RTCPeerConnection();
-      this.audioEl = document.createElement("audio");
-      this.audioEl.autoplay = true;
-      this.peerConnection.ontrack = (event) => {
-        if (!this.audioEl) return;
-        this.audioEl.srcObject = event.streams[0];
-      };
+      const agent = new RealtimeAgent({
+        name: "Meeting Bouncer Voice",
+        instructions:
+          "You are Meeting Bouncer, a comedic game-show referee. Only speak when asked to roast a violation. Return exactly one short line with at most 12 words. No hate, slurs, protected-class insults, sexual content, or harassment."
+      });
 
-      if (micStream) {
-        for (const track of micStream.getAudioTracks()) {
-          this.peerConnection.addTrack(track, micStream);
+      this.session = new RealtimeSession(agent, {
+        model: token.model || "gpt-realtime"
+      });
+
+      this.session.on("transport_event", (event: unknown) => {
+        const payload = event as Record<string, unknown>;
+        const type = String(payload?.type ?? "");
+
+        if (type === "input_audio_buffer.speech_started" || type === "audio_start") {
+          this.options.onSpeechActivity?.(true);
         }
-      }
-
-      this.dataChannel = this.peerConnection.createDataChannel("oai-events");
-      this.dataChannel.onopen = () => {
-        this.dataChannel?.send(
-          JSON.stringify({
-            type: "session.update",
-            session: {
-              modalities: ["audio", "text"],
-              input_audio_transcription: { model: "gpt-realtime-whisper" },
-              turn_detection: {
-                type: "server_vad",
-                threshold: 0.55,
-                silence_duration_ms: 700
-              }
-            }
-          })
-        );
-      };
-      this.dataChannel.onmessage = (event) => {
-        try {
-          const payload = JSON.parse(event.data) as Record<string, unknown>;
-          const type = String(payload.type ?? "");
-          if (type === "input_audio_buffer.speech_started") {
+        if (type === "input_audio_buffer.speech_stopped" || type === "audio_stopped") {
+          this.options.onSpeechActivity?.(false);
+        }
+        if (type === "response.audio_transcript.delta" || type === "response.audio_transcript.done") {
+          const text = String(payload.delta ?? payload.transcript ?? "");
+          if (text) {
             this.options.onSpeechActivity?.(true);
+            this.options.onTranscript(text, false);
           }
-          if (type === "input_audio_buffer.speech_stopped") {
-            this.options.onSpeechActivity?.(false);
-          }
-          if (type === "response.audio_transcript.delta" || type === "response.audio_transcript.done") {
-            const text = String(payload.delta ?? payload.transcript ?? "");
-            if (text) {
-              this.options.onSpeechActivity?.(true);
-              this.options.onTranscript(text, false);
-            }
-          }
-          if (type === "conversation.item.input_audio_transcription.completed") {
-            const text = String(payload.transcript ?? "");
-            if (text) {
-              this.options.onSpeechActivity?.(true);
-              this.options.onTranscript(text, false);
-            }
-          }
-          if (type === "response.text.delta" && typeof payload.delta === "string" && payload.delta.includes("speaker")) {
-            this.options.onAutoSpeakerHint?.(payload.delta);
-          }
-        } catch {
-          // Ignore malformed data channel payloads.
         }
-      };
-
-      const offer = await this.peerConnection.createOffer({
-        offerToReceiveAudio: true
+        if (type === "conversation.item.input_audio_transcription.completed") {
+          const text = String(payload.transcript ?? "");
+          if (text) {
+            this.options.onSpeechActivity?.(true);
+            this.options.onTranscript(text, false);
+          }
+        }
+        if (type === "response.text.delta" && typeof payload.delta === "string" && payload.delta.includes("speaker")) {
+          this.options.onAutoSpeakerHint?.(payload.delta);
+        }
       });
-      await this.peerConnection.setLocalDescription(offer);
 
-      // WebRTC SDP exchange against OpenAI Realtime endpoint.
-      // If this handshake fails, the app gracefully falls back to speechSynthesis.
-      const response = await fetch("https://api.openai.com/v1/realtime?model=gpt-realtime-2", {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${token.client_secret}`,
-          "Content-Type": "application/sdp"
-        },
-        body: offer.sdp ?? ""
-      });
-      if (!response.ok) {
-        throw new Error("Realtime SDP handshake failed");
+      if (micStream && micStream.getAudioTracks().length > 0) {
+        // SDK-managed WebRTC captures mic internally.
+        // We still pass through host mic stream in app for local meter/state.
       }
-      const answerSdp = await response.text();
-      await this.peerConnection.setRemoteDescription({ type: "answer", sdp: answerSdp });
+
+      await this.session.connect({
+        apiKey: token.client_secret
+      });
       this.connected = true;
-      this.options.onStatus("Realtime voice connected");
+      this.options.onStatus(`Realtime voice connected (${token.model || "gpt-realtime"})`);
     } catch (error) {
       const reason = error instanceof Error ? error.message : "Unknown realtime failure";
       this.fallbackMode = true;
@@ -160,32 +119,19 @@ export class RealtimeVoiceController {
       return;
     }
     const line = getRandomBouncerLine(violationType);
-    if (this.fallbackMode || !this.dataChannel || this.dataChannel.readyState !== "open") {
+    if (this.fallbackMode || !this.session) {
       const utterance = new SpeechSynthesisUtterance(line);
       utterance.rate = 1.08;
       utterance.pitch = 1.05;
       speechSynthesis.speak(utterance);
       return;
     }
-
-    this.dataChannel.send(
-      JSON.stringify({
-        type: "response.create",
-        response: {
-          modalities: ["audio", "text"],
-          instructions: `Say exactly one playful roast line (max 12 words): "${line}"`,
-          max_output_tokens: 40
-        }
-      })
-    );
+    this.session.sendMessage(`Say exactly one playful roast line (max 12 words): "${line}"`);
   }
 
   disconnect(): void {
-    this.dataChannel?.close();
-    this.peerConnection?.close();
-    this.peerConnection = null;
-    this.dataChannel = null;
-    this.audioEl = null;
+    this.session?.close();
+    this.session = null;
     this.connected = false;
   }
 }
