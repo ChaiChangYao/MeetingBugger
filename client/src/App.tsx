@@ -95,6 +95,7 @@ export default function App(): JSX.Element {
   const liveVolumePct = Math.min(100, Math.round((micRms / Math.max(0.006, sensitivity * 0.75)) * 100));
   const speechEnergyDetected = isRecordingVoice && micRms >= Math.max(0.008, sensitivity * 0.35);
   const effectiveSpeaking = micSpeaking || realtimeSpeaking || speechEnergyDetected;
+  const overlapBlocksYap = multipleSpeakersLikely && participants.length >= 2;
   const leaderboardParticipants = participants.map((participant) => {
     const baseline = leaderboardBaselineRef.current[participant.id];
     if (!baseline) {
@@ -291,7 +292,14 @@ export default function App(): JSX.Element {
   }, [activeSpeakerId, effectiveSpeaking, micPitchHz]);
 
   useEffect(() => {
-    if (!micPitchHz || !effectiveSpeaking) return;
+    if (participants.length < 2) {
+      setMultipleSpeakersLikely(false);
+      return;
+    }
+    if (!micPitchHz || !effectiveSpeaking) {
+      setMultipleSpeakersLikely(false);
+      return;
+    }
     const next = [...recentPitchSamplesRef.current, micPitchHz].slice(-12);
     recentPitchSamplesRef.current = next;
     if (next.length < 6) {
@@ -302,7 +310,7 @@ export default function App(): JSX.Element {
     const variance = next.reduce((sum, value) => sum + (value - avg) ** 2, 0) / next.length;
     const stdDev = Math.sqrt(variance);
     setMultipleSpeakersLikely(stdDev > 36);
-  }, [effectiveSpeaking, micPitchHz]);
+  }, [effectiveSpeaking, micPitchHz, participants.length]);
 
   useEffect(() => {
     if (!autoSpeakerGuess || !effectiveSpeaking || !micPitchHz || participants.length < 2) return;
@@ -338,19 +346,19 @@ export default function App(): JSX.Element {
   }, [activeSpeakerId, effectiveSpeaking, isRecordingVoice, myParticipant, participants]);
 
   useEffect(() => {
-    if (!multipleSpeakersLikely || !activeSpeakerId) return;
+    if (!overlapBlocksYap || !activeSpeakerId) return;
     const now = Date.now();
     if (now - lastAmbiguousResetRef.current < 1200) return;
     lastAmbiguousResetRef.current = now;
     detectorRef.current.resetCurrentYap(activeSpeakerId, now);
     setYapProgressMs(0);
-  }, [activeSpeakerId, multipleSpeakersLikely]);
+  }, [activeSpeakerId, overlapBlocksYap]);
 
   useEffect(() => {
     const id = window.setInterval(() => {
       const recentTranscript = transcript.slice(-3).map((line) => line.text).join(" ");
       const claiming = participants.some((participant) => participant.id === activeSpeakerId && participant.isClaimingSpeaker);
-      if (multipleSpeakersLikely) {
+      if (overlapBlocksYap) {
         setYapProgressMs(0);
         return;
       }
@@ -372,7 +380,7 @@ export default function App(): JSX.Element {
       fireViolation(violation.type, violation.reason, violation.speakerId);
     }, 200);
     return () => window.clearInterval(id);
-  }, [activeSpeakerId, micRms, multipleSpeakersLikely, participants, transcript, effectiveSpeaking, sensitivity]);
+  }, [activeSpeakerId, micRms, overlapBlocksYap, participants, transcript, effectiveSpeaking, sensitivity]);
 
   useEffect(() => {
     if (!activeSpeakerId || (!effectiveSpeaking && micRms < sensitivity)) return;
@@ -569,7 +577,12 @@ export default function App(): JSX.Element {
       <p className="status-line">
         Voice capture: {isRecordingVoice ? "RECORDING VOICE" : "NOT RECORDING VOICE"}
       </p>
-      {multipleSpeakersLikely ? <p className="status-line">Multiple voices detected: YAP-O-METER reset</p> : null}
+      {overlapBlocksYap ? <p className="status-line">Multiple voices detected: YAP-O-METER reset</p> : null}
+      {!isRecordingVoice ? <p className="status-line">YAP paused: host mic is off</p> : null}
+      {isRecordingVoice && !activeSpeakerId ? <p className="status-line">YAP paused: no active speaker selected</p> : null}
+      {isRecordingVoice && activeSpeakerId && !effectiveSpeaking ? (
+        <p className="status-line">YAP paused: no speech detected</p>
+      ) : null}
 
       <section className="control-row">
         <button className="btn" onClick={toggleHostMic}>
