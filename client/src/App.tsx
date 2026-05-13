@@ -358,7 +358,11 @@ export default function App(): JSX.Element {
         rms: effectiveSpeaking ? Math.max(micRms, sensitivity + 0.002) : micRms,
         transcriptText: recentTranscript
       });
-      setYapProgressMs(detectorRef.current.getYapProgressMs(effectiveSpeakerId, Date.now()));
+      if (!effectiveSpeaking) {
+        setYapProgressMs(0);
+      } else {
+        setYapProgressMs(detectorRef.current.getYapProgressMs(effectiveSpeakerId, Date.now()));
+      }
 
       if (!violation) return;
       fireViolation(violation.type, violation.reason, violation.speakerId);
