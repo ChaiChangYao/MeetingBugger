@@ -56,6 +56,7 @@ export default function App(): JSX.Element {
   const [autoSpeakerGuess, setAutoSpeakerGuess] = useState(true);
   const [micPeakPct, setMicPeakPct] = useState(0);
   const [multipleSpeakersLikely, setMultipleSpeakersLikely] = useState(false);
+  const [leaderboardBaselineById, setLeaderboardBaselineById] = useState<Record<string, Participant["stats"]>>({});
   const statsTickRef = useRef(0);
   const pitchProfilesRef = useRef<Record<string, { avgHz: number; samples: number }>>({});
   const recentPitchSamplesRef = useRef<number[]>([]);
@@ -65,7 +66,6 @@ export default function App(): JSX.Element {
   const activeSpeakerRef = useRef<string | null>(null);
   const participantsRef = useRef<Participant[]>([]);
   const realtimeSpeechTimeoutRef = useRef<number | null>(null);
-  const leaderboardBaselineRef = useRef<Record<string, Participant["stats"]>>({});
 
   const detectorRef = useRef(new ViolationDetector());
   const soundRef = useRef(createSoundController());
@@ -97,7 +97,7 @@ export default function App(): JSX.Element {
   const effectiveSpeaking = micSpeaking || realtimeSpeaking || speechEnergyDetected;
   const overlapBlocksYap = multipleSpeakersLikely && participants.length >= 2;
   const leaderboardParticipants = participants.map((participant) => {
-    const baseline = leaderboardBaselineRef.current[participant.id];
+    const baseline = leaderboardBaselineById[participant.id];
     if (!baseline) {
       return participant;
     }
@@ -119,11 +119,17 @@ export default function App(): JSX.Element {
   }, [activeSpeakerId, participants]);
 
   useEffect(() => {
-    for (const participant of participants) {
-      if (!leaderboardBaselineRef.current[participant.id]) {
-        leaderboardBaselineRef.current[participant.id] = { ...participant.stats };
+    setLeaderboardBaselineById((prev) => {
+      const next = { ...prev };
+      let changed = false;
+      for (const participant of participants) {
+        if (!next[participant.id]) {
+          next[participant.id] = { ...participant.stats };
+          changed = true;
+        }
       }
-    }
+      return changed ? next : prev;
+    });
   }, [participants]);
 
   useEffect(() => {
@@ -384,6 +390,7 @@ export default function App(): JSX.Element {
 
   useEffect(() => {
     if (!activeSpeakerId || (!effectiveSpeaking && micRms < sensitivity)) return;
+    if (yapProgressMs <= 0) return;
     const now = Date.now();
     if (now - statsTickRef.current < 1000) return;
     statsTickRef.current = now;
@@ -395,7 +402,7 @@ export default function App(): JSX.Element {
         participantId: activeSpeakerId,
         stats: {
           totalTalkMs: target.stats.totalTalkMs + 1000,
-          longestYapMs: Math.max(target.stats.longestYapMs, yapProgressMs)
+          longestYapMs: Math.max(target.stats.longestYapMs, Math.round(yapProgressMs))
         }
       });
       return;
@@ -408,7 +415,7 @@ export default function App(): JSX.Element {
               stats: {
                 ...participant.stats,
                 totalTalkMs: participant.stats.totalTalkMs + 1000,
-                longestYapMs: Math.max(participant.stats.longestYapMs, yapProgressMs)
+                longestYapMs: Math.max(participant.stats.longestYapMs, Math.round(yapProgressMs))
               }
             }
           : participant
@@ -466,7 +473,7 @@ export default function App(): JSX.Element {
   };
 
   const join = (meetingName: string, username: string): void => {
-    leaderboardBaselineRef.current = {};
+    setLeaderboardBaselineById({});
     setSelfName(username.trim());
     setRoomName(meetingName.trim());
     socket.emit("room:join", { roomName: meetingName.trim(), username: username.trim() });
@@ -516,7 +523,7 @@ export default function App(): JSX.Element {
 
   const simulateParticipants = (): void => {
     const now = Date.now();
-    leaderboardBaselineRef.current = {};
+    setLeaderboardBaselineById({});
     setDemoParticipants([
       {
         id: "demo-1",
