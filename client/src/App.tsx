@@ -42,6 +42,7 @@ export default function App(): JSX.Element {
   const [micPitchHz, setMicPitchHz] = useState<number | null>(null);
   const [micSpeaking, setMicSpeaking] = useState(false);
   const [micReady, setMicReady] = useState(false);
+  const [isRecordingVoice, setIsRecordingVoice] = useState(false);
   const [meterError, setMeterError] = useState("");
   const [demoMode, setDemoMode] = useState(true);
   const [soundMode, setSoundMode] = useState<SoundMode>("airhorn");
@@ -331,10 +332,26 @@ export default function App(): JSX.Element {
     const stream = await meterRef.current.start();
     if (stream) {
       setMicReady(true);
+      setIsRecordingVoice(true);
       await voiceRef.current?.connect(stream);
     } else {
       setMicReady(false);
+      setIsRecordingVoice(false);
     }
+  };
+
+  const stopHostMic = (): void => {
+    meterRef.current.stop();
+    setMicReady(false);
+    setIsRecordingVoice(false);
+  };
+
+  const toggleHostMic = (): void => {
+    if (isRecordingVoice) {
+      stopHostMic();
+      return;
+    }
+    void startHostMic();
   };
 
   const simulateParticipants = (): void => {
@@ -396,10 +413,13 @@ export default function App(): JSX.Element {
       <h1 className="mega-title">MEETING BOUNCER</h1>
       <p className="room-pill">ROOM: {roomName || roomState?.roomName || "demo-room"}</p>
       <p className="status-line">{voiceStatus}</p>
+      <p className="status-line">
+        Voice capture: {isRecordingVoice ? "RECORDING VOICE" : "NOT RECORDING VOICE"}
+      </p>
 
       <section className="control-row">
-        <button className="btn" onClick={() => void startHostMic()}>
-          {micReady ? "Host mic active" : "Use this device as host mic"}
+        <button className="btn" onClick={toggleHostMic}>
+          {isRecordingVoice ? "Stop host mic recording" : "Use this device as host mic"}
         </button>
         <button className="btn" onClick={claimSpeaker}>
           I&apos;M TALKING
