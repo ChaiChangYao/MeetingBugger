@@ -93,7 +93,8 @@ export default function App(): JSX.Element {
   const myParticipant = participants.find((participant) => participant.username === selfName) ?? null;
   const activeSpeakerId = roomState?.activeSpeakerId ?? null;
   const liveVolumePct = Math.min(100, Math.round((micRms / Math.max(0.006, sensitivity * 0.75)) * 100));
-  const effectiveSpeaking = micSpeaking || realtimeSpeaking;
+  const speechEnergyDetected = isRecordingVoice && micRms >= Math.max(0.008, sensitivity * 0.35);
+  const effectiveSpeaking = micSpeaking || realtimeSpeaking || speechEnergyDetected;
   const leaderboardParticipants = participants.map((participant) => {
     const baseline = leaderboardBaselineRef.current[participant.id];
     if (!baseline) {
@@ -326,12 +327,15 @@ export default function App(): JSX.Element {
   }, [activeSpeakerId, autoSpeakerGuess, effectiveSpeaking, micPitchHz, participants]);
 
   useEffect(() => {
-    if (!isRecordingVoice || !effectiveSpeaking || activeSpeakerId || !myParticipant) return;
+    if (!isRecordingVoice || !effectiveSpeaking || activeSpeakerId) return;
+    const speakerCandidate =
+      participants.find((participant) => participant.isHostMic) ?? myParticipant ?? participants[0] ?? null;
+    if (!speakerCandidate) return;
     const now = Date.now();
     if (now - lastSelfClaimRef.current < 1200) return;
     lastSelfClaimRef.current = now;
-    selectSpeaker(myParticipant.id);
-  }, [activeSpeakerId, effectiveSpeaking, isRecordingVoice, myParticipant]);
+    selectSpeaker(speakerCandidate.id);
+  }, [activeSpeakerId, effectiveSpeaking, isRecordingVoice, myParticipant, participants]);
 
   useEffect(() => {
     if (!multipleSpeakersLikely || !activeSpeakerId) return;
@@ -678,6 +682,9 @@ export default function App(): JSX.Element {
           <p className="text-xs font-bold">Mic pitch: {micPitchHz ? `${Math.round(micPitchHz)} Hz` : "n/a"}</p>
           <p className="text-xs font-bold">
             {effectiveSpeaking ? "Speaking detected (mic or Realtime)" : "Silence detected"}
+          </p>
+          <p className="text-xs font-bold">
+            {speechEnergyDetected ? "Live mic energy detected" : "Live mic energy low"}
           </p>
           {micRms > sensitivity && !activeSpeakerId ? (
             <p className="text-xs font-bold text-red-700">Mystery Yapper detected: assign a speaker.</p>
