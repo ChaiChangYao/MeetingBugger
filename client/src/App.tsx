@@ -14,6 +14,7 @@ import { Participant, RoomState, TranscriptLine, ViolationPayload, ViolationType
 import { ViolationDetector } from "./lib/violationDetector";
 
 const YAP_TARGET_MS = 10_000;
+const DETECTOR_SPEAKING_RMS = 0.05;
 
 const getStatusByViolation = (
   participantId: string,
@@ -95,7 +96,7 @@ export default function App(): JSX.Element {
   const myParticipant = participants.find((participant) => participant.username === selfName) ?? null;
   const activeSpeakerId = roomState?.activeSpeakerId ?? null;
   const liveVolumePct = Math.min(100, Math.round((micRms / Math.max(0.006, sensitivity * 0.75)) * 100));
-  const speechEnergyDetected = isRecordingVoice && micRms >= Math.max(0.008, sensitivity * 0.35);
+  const speechEnergyDetected = isRecordingVoice && micRms >= Math.max(0.006, sensitivity * 0.25);
   const effectiveSpeaking = micSpeaking || realtimeSpeaking || sustainedMicEnergyDetected;
   const overlapBlocksYap = multipleSpeakersLikely && participants.length >= 2;
   const leaderboardParticipants = participants.map((participant) => {
@@ -392,7 +393,8 @@ export default function App(): JSX.Element {
         now: Date.now(),
         activeSpeakerId: effectiveSpeakerId,
         isSpeakerClaiming: claiming,
-        rms: effectiveSpeaking ? Math.max(micRms, sensitivity + 0.002) : micRms,
+        // Keep detector speaking signal robust even when UI sensitivity slider is low.
+        rms: effectiveSpeaking ? Math.max(micRms, DETECTOR_SPEAKING_RMS) : micRms,
         transcriptText: recentTranscript
       });
       if (!effectiveSpeaking) {
