@@ -69,6 +69,13 @@ You can still demo everything even if no key or mic permission:
 - `Space`: claim current speaker
 - `Escape`: clear active speaker
 
+## Mic + Realtime troubleshooting
+
+- Click **Use this device as host mic** first (this starts meter + sends mic into Realtime).
+- In Chrome, allow microphone permission for `localhost`.
+- If Realtime fails, app switches to **Voice fallback mode** automatically.
+- The **Experimental auto speaker guess (same mic)** feature is heuristic (pitch-based), not true diarization.
+
 ## Render deployment (Node web service)
 
 1. Push this project to GitHub.

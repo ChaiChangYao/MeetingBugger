@@ -173,6 +173,18 @@ select {
   transition: width 100ms linear;
 }
 
+.mic-meter-wrap {
+  border: 3px solid #000;
+  height: 20px;
+  background: #f1f1f1;
+}
+
+.mic-meter-bar {
+  height: 100%;
+  background: linear-gradient(90deg, #00d2ff, #6c63ff);
+  transition: width 100ms linear;
+}
+
 .table-head,
 .table-row {
   display: grid;

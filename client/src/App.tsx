@@ -39,6 +39,9 @@ export default function App(): JSX.Element {
   const [voiceStatus, setVoiceStatus] = useState("Voice not connected");
   const [transcript, setTranscript] = useState<TranscriptLine[]>([]);
   const [micRms, setMicRms] = useState(0);
+  const [micPitchHz, setMicPitchHz] = useState<number | null>(null);
+  const [micSpeaking, setMicSpeaking] = useState(false);
+  const [micReady, setMicReady] = useState(false);
   const [meterError, setMeterError] = useState("");
   const [demoMode, setDemoMode] = useState(true);
   const [soundMode, setSoundMode] = useState<SoundMode>("airhorn");
@@ -48,7 +51,12 @@ export default function App(): JSX.Element {
   const [yapProgressMs, setYapProgressMs] = useState(0);
   const [lastViolation, setLastViolation] = useState<ViolationPayload | null>(null);
   const [demoParticipants, setDemoParticipants] = useState<Participant[]>([]);
+  const [autoSpeakerGuess, setAutoSpeakerGuess] = useState(true);
   const statsTickRef = useRef(0);
+  const pitchProfilesRef = useRef<Record<string, { avgHz: number; samples: number }>>({});
+  const lastAutoAssignRef = useRef(0);
+  const activeSpeakerRef = useRef<string | null>(null);
+  const participantsRef = useRef<Participant[]>([]);
 
   const detectorRef = useRef(new ViolationDetector());
   const soundRef = useRef(createSoundController());
@@ -56,8 +64,10 @@ export default function App(): JSX.Element {
   const meterRef = useRef(
     createAudioMeter({
       speakingThreshold: sensitivity,
-      onSample: ({ rms }) => {
+      onSample: ({ rms, isSpeaking, pitchHz }) => {
         setMicRms(rms);
+        setMicSpeaking(isSpeaking);
+        setMicPitchHz(pitchHz);
       },
       onError: (message) => {
         setMeterError(message);
@@ -73,6 +83,11 @@ export default function App(): JSX.Element {
 
   const myParticipant = participants.find((participant) => participant.username === selfName) ?? null;
   const activeSpeakerId = roomState?.activeSpeakerId ?? null;
+
+  useEffect(() => {
+    activeSpeakerRef.current = activeSpeakerId;
+    participantsRef.current = participants;
+  }, [activeSpeakerId, participants]);
 
   const selectSpeaker = (speakerId: string | null): void => {
     if (roomName) {
@@ -117,14 +132,16 @@ export default function App(): JSX.Element {
       muted: voiceMuted,
       onStatus: setVoiceStatus,
       onTranscript: (text, lowConfidence) => {
+        const speakerId = activeSpeakerRef.current;
+        const people = participantsRef.current;
         setTranscript((prev) =>
           [
             ...prev.slice(-8),
             {
               id: crypto.randomUUID(),
-              speakerId: activeSpeakerId,
-              speakerName: activeSpeakerId
-                ? participants.find((participant) => participant.id === activeSpeakerId)?.username ?? "Unknown"
+              speakerId,
+              speakerName: speakerId
+                ? people.find((participant) => participant.id === speakerId)?.username ?? "Unknown"
                 : "Mystery Yapper",
               text,
               lowConfidence,
@@ -134,12 +151,14 @@ export default function App(): JSX.Element {
         );
       }
     });
-    void voiceRef.current.connect();
-
     return () => {
       voiceRef.current?.disconnect();
     };
-  }, [activeSpeakerId, participants, voiceMuted]);
+  }, []);
+
+  useEffect(() => {
+    voiceRef.current?.setMuted(voiceMuted);
+  }, [voiceMuted]);
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent): void => {
@@ -166,6 +185,36 @@ export default function App(): JSX.Element {
   useEffect(() => {
     meterRef.current.setSensitivity(sensitivity);
   }, [sensitivity]);
+
+  useEffect(() => {
+    if (!micPitchHz || !micSpeaking || !activeSpeakerId) return;
+    const existing = pitchProfilesRef.current[activeSpeakerId] ?? { avgHz: micPitchHz, samples: 0 };
+    const nextSamples = existing.samples + 1;
+    const nextAvg = (existing.avgHz * existing.samples + micPitchHz) / nextSamples;
+    pitchProfilesRef.current[activeSpeakerId] = { avgHz: nextAvg, samples: nextSamples };
+  }, [activeSpeakerId, micPitchHz, micSpeaking]);
+
+  useEffect(() => {
+    if (!autoSpeakerGuess || !micSpeaking || !micPitchHz || participants.length < 2) return;
+    const now = Date.now();
+    if (now - lastAutoAssignRef.current < 1200) return;
+    const candidates = participants
+      .map((participant) => {
+        const profile = pitchProfilesRef.current[participant.id];
+        if (!profile || profile.samples < 4) return null;
+        return {
+          participantId: participant.id,
+          distance: Math.abs(profile.avgHz - micPitchHz)
+        };
+      })
+      .filter((entry): entry is { participantId: string; distance: number } => Boolean(entry))
+      .sort((a, b) => a.distance - b.distance);
+    const best = candidates[0];
+    if (!best || best.distance > 55) return;
+    if (best.participantId === activeSpeakerId) return;
+    lastAutoAssignRef.current = now;
+    selectSpeaker(best.participantId);
+  }, [activeSpeakerId, autoSpeakerGuess, micPitchHz, micSpeaking, participants]);
 
   useEffect(() => {
     const id = window.setInterval(() => {
@@ -279,7 +328,13 @@ export default function App(): JSX.Element {
     if (roomName) {
       socket.emit("host:micStatus", { roomName });
     }
-    await meterRef.current.start();
+    const stream = await meterRef.current.start();
+    if (stream) {
+      setMicReady(true);
+      await voiceRef.current?.connect(stream);
+    } else {
+      setMicReady(false);
+    }
   };
 
   const simulateParticipants = (): void => {
@@ -344,7 +399,7 @@ export default function App(): JSX.Element {
 
       <section className="control-row">
         <button className="btn" onClick={() => void startHostMic()}>
-          Use this device as host mic
+          {micReady ? "Host mic active" : "Use this device as host mic"}
         </button>
         <button className="btn" onClick={claimSpeaker}>
           I&apos;M TALKING
@@ -432,7 +487,20 @@ export default function App(): JSX.Element {
             <input type="checkbox" checked={voiceMuted} onChange={(event) => setVoiceMuted(event.target.checked)} />
             Voice muted
           </label>
+          <label className="toggle">
+            <input
+              type="checkbox"
+              checked={autoSpeakerGuess}
+              onChange={(event) => setAutoSpeakerGuess(event.target.checked)}
+            />
+            Experimental auto speaker guess (same mic)
+          </label>
+          <div className="mic-meter-wrap" aria-label="Live microphone meter">
+            <div className="mic-meter-bar" style={{ width: `${Math.min(100, micRms * 900)}%` }} />
+          </div>
           <p className="text-xs font-bold">Mic RMS: {micRms.toFixed(3)}</p>
+          <p className="text-xs font-bold">Mic pitch: {micPitchHz ? `${Math.round(micPitchHz)} Hz` : "n/a"}</p>
+          <p className="text-xs font-bold">{micSpeaking ? "Speaking detected" : "Silence detected"}</p>
           {micRms > sensitivity && !activeSpeakerId ? (
             <p className="text-xs font-bold text-red-700">Mystery Yapper detected: assign a speaker.</p>
           ) : null}

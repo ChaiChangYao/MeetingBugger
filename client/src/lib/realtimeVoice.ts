@@ -11,6 +11,7 @@ interface VoiceOptions {
   onStatus: (status: string) => void;
   onTranscript: (text: string, lowConfidence: boolean) => void;
   muted: boolean;
+  onAutoSpeakerHint?: (hint: string) => void;
 }
 
 export class RealtimeVoiceController {
@@ -19,9 +20,14 @@ export class RealtimeVoiceController {
   private audioEl: HTMLAudioElement | null = null;
   private fallbackMode = false;
   private options: VoiceOptions;
+  private connected = false;
 
   constructor(options: VoiceOptions) {
     this.options = options;
+  }
+
+  setMuted(muted: boolean): void {
+    this.options.muted = muted;
   }
 
   private async fetchToken(): Promise<RealtimeTokenResponse> {
@@ -32,8 +38,12 @@ export class RealtimeVoiceController {
     return (await response.json()) as RealtimeTokenResponse;
   }
 
-  async connect(): Promise<void> {
+  async connect(micStream?: MediaStream): Promise<void> {
     try {
+      if (this.connected) {
+        this.options.onStatus("Realtime voice connected");
+        return;
+      }
       const token = await this.fetchToken();
       if (!token.client_secret) {
         throw new Error("Missing client secret");
@@ -51,7 +61,29 @@ export class RealtimeVoiceController {
         this.audioEl.srcObject = event.streams[0];
       };
 
+      if (micStream) {
+        for (const track of micStream.getAudioTracks()) {
+          this.peerConnection.addTrack(track, micStream);
+        }
+      }
+
       this.dataChannel = this.peerConnection.createDataChannel("oai-events");
+      this.dataChannel.onopen = () => {
+        this.dataChannel?.send(
+          JSON.stringify({
+            type: "session.update",
+            session: {
+              modalities: ["audio", "text"],
+              input_audio_transcription: { model: "gpt-realtime-whisper" },
+              turn_detection: {
+                type: "server_vad",
+                threshold: 0.55,
+                silence_duration_ms: 700
+              }
+            }
+          })
+        );
+      };
       this.dataChannel.onmessage = (event) => {
         try {
           const payload = JSON.parse(event.data) as Record<string, unknown>;
@@ -64,12 +96,17 @@ export class RealtimeVoiceController {
             const text = String(payload.transcript ?? "");
             if (text) this.options.onTranscript(text, false);
           }
+          if (type === "response.text.delta" && typeof payload.delta === "string" && payload.delta.includes("speaker")) {
+            this.options.onAutoSpeakerHint?.(payload.delta);
+          }
         } catch {
           // Ignore malformed data channel payloads.
         }
       };
 
-      const offer = await this.peerConnection.createOffer();
+      const offer = await this.peerConnection.createOffer({
+        offerToReceiveAudio: true
+      });
       await this.peerConnection.setLocalDescription(offer);
 
       // WebRTC SDP exchange against OpenAI Realtime endpoint.
@@ -87,6 +124,7 @@ export class RealtimeVoiceController {
       }
       const answerSdp = await response.text();
       await this.peerConnection.setRemoteDescription({ type: "answer", sdp: answerSdp });
+      this.connected = true;
       this.options.onStatus("Realtime voice connected");
     } catch {
       this.fallbackMode = true;
@@ -125,5 +163,6 @@ export class RealtimeVoiceController {
     this.peerConnection = null;
     this.dataChannel = null;
     this.audioEl = null;
+    this.connected = false;
   }
 }

@@ -1,13 +1,15 @@
 export interface AudioSample {
   rms: number;
   isSpeaking: boolean;
+  pitchHz: number | null;
   timestamp: number;
 }
 
 export interface AudioMeterController {
-  start: () => Promise<void>;
+  start: () => Promise<MediaStream | null>;
   stop: () => void;
   setSensitivity: (value: number) => void;
+  getStream: () => MediaStream | null;
 }
 
 interface Options {
@@ -47,6 +49,42 @@ export const createAudioMeter = (options: Options): AudioMeterController => {
     return Math.sqrt(sum / data.length);
   };
 
+  const estimatePitchHz = (data: Uint8Array, sampleRate: number): number | null => {
+    const size = data.length;
+    const buffer = new Float32Array(size);
+    for (let i = 0; i < size; i += 1) {
+      buffer[i] = data[i] / 128 - 1;
+    }
+
+    let rms = 0;
+    for (let i = 0; i < size; i += 1) {
+      rms += buffer[i] * buffer[i];
+    }
+    rms = Math.sqrt(rms / size);
+    if (rms < 0.01) return null;
+
+    const minLag = Math.floor(sampleRate / 400);
+    const maxLag = Math.floor(sampleRate / 60);
+    let bestLag = -1;
+    let bestCorr = 0;
+
+    for (let lag = minLag; lag <= maxLag; lag += 1) {
+      let corr = 0;
+      for (let i = 0; i < size - lag; i += 1) {
+        corr += buffer[i] * buffer[i + lag];
+      }
+      if (corr > bestCorr) {
+        bestCorr = corr;
+        bestLag = lag;
+      }
+    }
+
+    if (bestLag <= 0) return null;
+    const pitch = sampleRate / bestLag;
+    if (pitch < 60 || pitch > 400) return null;
+    return pitch;
+  };
+
   return {
     start: async () => {
       teardown();
@@ -69,6 +107,7 @@ export const createAudioMeter = (options: Options): AudioMeterController => {
           if (!analyser) return;
           analyser.getByteTimeDomainData(data);
           const rms = computeRms(data);
+          const pitchHz = audioCtx ? estimatePitchHz(data, audioCtx.sampleRate) : null;
           const now = Date.now();
           if (rms > sensitivity) {
             if (!speakingSince) speakingSince = now;
@@ -76,16 +115,21 @@ export const createAudioMeter = (options: Options): AudioMeterController => {
             speakingSince = 0;
           }
           const isSpeaking = speakingSince > 0 && now - speakingSince >= 250;
-          options.onSample({ rms, isSpeaking, timestamp: now });
+          options.onSample({ rms, isSpeaking, pitchHz, timestamp: now });
         }, 100);
+        return stream;
       } catch (error) {
         const message = error instanceof Error ? error.message : "Failed to access microphone.";
         options.onError(message);
+        return null;
       }
     },
     stop: teardown,
     setSensitivity: (value) => {
       sensitivity = value;
+    },
+    getStream: () => {
+      return stream;
     }
   };
 };
