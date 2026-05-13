@@ -53,6 +53,7 @@ export default function App(): JSX.Element {
   const [lastViolation, setLastViolation] = useState<ViolationPayload | null>(null);
   const [demoParticipants, setDemoParticipants] = useState<Participant[]>([]);
   const [autoSpeakerGuess, setAutoSpeakerGuess] = useState(true);
+  const [micPeakPct, setMicPeakPct] = useState(0);
   const statsTickRef = useRef(0);
   const pitchProfilesRef = useRef<Record<string, { avgHz: number; samples: number }>>({});
   const lastAutoAssignRef = useRef(0);
@@ -84,6 +85,7 @@ export default function App(): JSX.Element {
 
   const myParticipant = participants.find((participant) => participant.username === selfName) ?? null;
   const activeSpeakerId = roomState?.activeSpeakerId ?? null;
+  const liveVolumePct = Math.min(100, Math.round((micRms / Math.max(0.006, sensitivity * 0.75)) * 100));
 
   useEffect(() => {
     activeSpeakerRef.current = activeSpeakerId;
@@ -186,6 +188,17 @@ export default function App(): JSX.Element {
   useEffect(() => {
     meterRef.current.setSensitivity(sensitivity);
   }, [sensitivity]);
+
+  useEffect(() => {
+    setMicPeakPct((prev) => (liveVolumePct > prev ? liveVolumePct : prev));
+  }, [liveVolumePct]);
+
+  useEffect(() => {
+    const id = window.setInterval(() => {
+      setMicPeakPct((prev) => Math.max(0, prev - 3));
+    }, 120);
+    return () => window.clearInterval(id);
+  }, []);
 
   useEffect(() => {
     if (!micPitchHz || !micSpeaking || !activeSpeakerId) return;
@@ -442,7 +455,13 @@ export default function App(): JSX.Element {
       </section>
 
       <section className="grid-two">
-        <Yapometer progressMs={yapProgressMs} targetMs={YAP_TARGET_MS} />
+        <Yapometer
+          progressMs={yapProgressMs}
+          targetMs={YAP_TARGET_MS}
+          liveVolumePct={liveVolumePct}
+          livePeakPct={micPeakPct}
+          isSpeaking={micSpeaking}
+        />
         <Leaderboard participants={participants} />
       </section>
 
@@ -516,7 +535,7 @@ export default function App(): JSX.Element {
             Experimental auto speaker guess (same mic)
           </label>
           <div className="mic-meter-wrap" aria-label="Live microphone meter">
-            <div className="mic-meter-bar" style={{ width: `${Math.min(100, micRms * 900)}%` }} />
+            <div className="mic-meter-bar" style={{ width: `${liveVolumePct}%` }} />
           </div>
           <p className="text-xs font-bold">Mic RMS: {micRms.toFixed(3)}</p>
           <p className="text-xs font-bold">Mic pitch: {micPitchHz ? `${Math.round(micPitchHz)} Hz` : "n/a"}</p>
