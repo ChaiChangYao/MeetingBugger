@@ -82,28 +82,29 @@ export class RealtimeVoiceController {
   }
 
   private async connectViaLegacyWebRtc(token: RealtimeTokenResponse, micStream?: MediaStream): Promise<void> {
-    this.peerConnection = new RTCPeerConnection();
+    const peerConnection = new RTCPeerConnection();
+    this.peerConnection = peerConnection;
     this.audioEl = document.createElement("audio");
     this.audioEl.autoplay = true;
-    this.peerConnection.ontrack = (event) => {
+    peerConnection.ontrack = (event) => {
       if (!this.audioEl) return;
       this.audioEl.srcObject = event.streams[0];
     };
 
     if (micStream) {
       for (const track of micStream.getAudioTracks()) {
-        this.peerConnection.addTrack(track, micStream);
+        peerConnection.addTrack(track, micStream);
       }
     }
 
-    this.dataChannel = this.peerConnection.createDataChannel("oai-events");
+    this.dataChannel = peerConnection.createDataChannel("oai-events");
     this.wireLegacyDataChannel(this.dataChannel);
 
     const model = token.model || "gpt-realtime";
-    const offer = await this.peerConnection.createOffer({
+    const offer = await peerConnection.createOffer({
       offerToReceiveAudio: true
     });
-    await this.peerConnection.setLocalDescription(offer);
+    await peerConnection.setLocalDescription(offer);
 
     const response = await fetch(`https://api.openai.com/v1/realtime?model=${encodeURIComponent(model)}`, {
       method: "POST",
@@ -118,7 +119,11 @@ export class RealtimeVoiceController {
     if (!response.ok) {
       throw new Error(`Legacy realtime SDP handshake failed: ${answerBody}`);
     }
-    await this.peerConnection.setRemoteDescription({ type: "answer", sdp: answerBody });
+    // Guard against race with disconnect() while awaiting network response.
+    if (this.peerConnection !== peerConnection) {
+      throw new Error("Legacy realtime connect cancelled");
+    }
+    await peerConnection.setRemoteDescription({ type: "answer", sdp: answerBody });
     this.connected = true;
     this.options.onStatus(`Realtime voice connected (${model}, legacy transport)`);
   }
