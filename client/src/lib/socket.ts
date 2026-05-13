@@ -11,6 +11,7 @@ export interface ClientToServerEvents {
   "room:join": (payload: { roomName: string; username: string }) => void;
   "room:leave": () => void;
   "speaker:claim": (payload: { roomName: string }) => void;
+  "speaker:toggleClaim": (payload: { roomName: string }) => void;
   "host:setActiveSpeaker": (payload: { roomName: string; speakerId: string | null }) => void;
   "host:micStatus": (payload: { roomName: string }) => void;
   "violation:triggered": (payload: ViolationPayload) => void;

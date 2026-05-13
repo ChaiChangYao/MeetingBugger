@@ -65,6 +65,7 @@ export default function App(): JSX.Element {
   const activeSpeakerRef = useRef<string | null>(null);
   const participantsRef = useRef<Participant[]>([]);
   const realtimeSpeechTimeoutRef = useRef<number | null>(null);
+  const leaderboardBaselineRef = useRef<Record<string, Participant["stats"]>>({});
 
   const detectorRef = useRef(new ViolationDetector());
   const soundRef = useRef(createSoundController());
@@ -93,11 +94,35 @@ export default function App(): JSX.Element {
   const activeSpeakerId = roomState?.activeSpeakerId ?? null;
   const liveVolumePct = Math.min(100, Math.round((micRms / Math.max(0.006, sensitivity * 0.75)) * 100));
   const effectiveSpeaking = micSpeaking || realtimeSpeaking;
+  const leaderboardParticipants = participants.map((participant) => {
+    const baseline = leaderboardBaselineRef.current[participant.id];
+    if (!baseline) {
+      return participant;
+    }
+    return {
+      ...participant,
+      stats: {
+        totalTalkMs: Math.max(0, participant.stats.totalTalkMs - baseline.totalTalkMs),
+        bounces: Math.max(0, participant.stats.bounces - baseline.bounces),
+        longestYapMs: Math.max(0, participant.stats.longestYapMs - baseline.longestYapMs),
+        illegibleCount: Math.max(0, participant.stats.illegibleCount - baseline.illegibleCount),
+        tooSoftCount: Math.max(0, participant.stats.tooSoftCount - baseline.tooSoftCount)
+      }
+    };
+  });
 
   useEffect(() => {
     activeSpeakerRef.current = activeSpeakerId;
     participantsRef.current = participants;
   }, [activeSpeakerId, participants]);
+
+  useEffect(() => {
+    for (const participant of participants) {
+      if (!leaderboardBaselineRef.current[participant.id]) {
+        leaderboardBaselineRef.current[participant.id] = { ...participant.stats };
+      }
+    }
+  }, [participants]);
 
   useEffect(() => {
     detectorRef.current.onActiveSpeakerChanged(activeSpeakerId, Date.now());
@@ -112,12 +137,43 @@ export default function App(): JSX.Element {
   };
 
   const claimSpeaker = (): void => {
-    if (roomName) {
-      socket.emit("speaker:claim", { roomName });
+    if (!myParticipant) {
       return;
     }
-    const fallbackId = myParticipant?.id ?? participants[0]?.id ?? null;
-    selectSpeaker(fallbackId);
+    if (roomName) {
+      socket.emit("speaker:toggleClaim", { roomName });
+      return;
+    }
+    const isAlreadyClaiming = myParticipant.isClaimingSpeaker || activeSpeakerId === myParticipant.id;
+    if (isAlreadyClaiming) {
+      setRoomState((prev) =>
+        prev
+          ? {
+              ...prev,
+              activeSpeakerId: null,
+              participants: prev.participants.map((participant) => ({
+                ...participant,
+                isClaimingSpeaker: false
+              })),
+              updatedAt: Date.now()
+            }
+          : prev
+      );
+      return;
+    }
+    selectSpeaker(myParticipant.id);
+    setRoomState((prev) =>
+      prev
+        ? {
+            ...prev,
+            participants: prev.participants.map((participant) => ({
+              ...participant,
+              isClaimingSpeaker: participant.id === myParticipant.id
+            })),
+            updatedAt: Date.now()
+          }
+        : prev
+    );
   };
 
   useEffect(() => {
@@ -394,6 +450,7 @@ export default function App(): JSX.Element {
   };
 
   const join = (meetingName: string, username: string): void => {
+    leaderboardBaselineRef.current = {};
     setSelfName(username.trim());
     setRoomName(meetingName.trim());
     socket.emit("room:join", { roomName: meetingName.trim(), username: username.trim() });
@@ -405,6 +462,9 @@ export default function App(): JSX.Element {
     }
     const stream = await meterRef.current.start();
     if (stream) {
+      detectorRef.current = new ViolationDetector();
+      setYapProgressMs(0);
+      setMultipleSpeakersLikely(false);
       setMicReady(true);
       setIsRecordingVoice(true);
       await voiceRef.current?.connect(stream);
@@ -417,6 +477,15 @@ export default function App(): JSX.Element {
   const stopHostMic = (): void => {
     meterRef.current.stop();
     voiceRef.current?.disconnect();
+    detectorRef.current = new ViolationDetector();
+    setYapProgressMs(0);
+    setMicSpeaking(false);
+    setRealtimeSpeaking(false);
+    setMultipleSpeakersLikely(false);
+    setMicPeakPct(0);
+    setMicRms(0);
+    recentPitchSamplesRef.current = [];
+    pitchProfilesRef.current = {};
     setMicReady(false);
     setIsRecordingVoice(false);
   };
@@ -431,6 +500,7 @@ export default function App(): JSX.Element {
 
   const simulateParticipants = (): void => {
     const now = Date.now();
+    leaderboardBaselineRef.current = {};
     setDemoParticipants([
       {
         id: "demo-1",
@@ -439,7 +509,7 @@ export default function App(): JSX.Element {
         joinedAt: now - 10000,
         isHostMic: true,
         isClaimingSpeaker: false,
-        stats: { totalTalkMs: 12000, bounces: 1, longestYapMs: 10000, illegibleCount: 0, tooSoftCount: 0 }
+        stats: { totalTalkMs: 0, bounces: 0, longestYapMs: 0, illegibleCount: 0, tooSoftCount: 0 }
       },
       {
         id: "demo-2",
@@ -448,7 +518,7 @@ export default function App(): JSX.Element {
         joinedAt: now - 8000,
         isHostMic: false,
         isClaimingSpeaker: false,
-        stats: { totalTalkMs: 4300, bounces: 2, longestYapMs: 5400, illegibleCount: 1, tooSoftCount: 0 }
+        stats: { totalTalkMs: 0, bounces: 0, longestYapMs: 0, illegibleCount: 0, tooSoftCount: 0 }
       },
       {
         id: "demo-3",
@@ -457,7 +527,7 @@ export default function App(): JSX.Element {
         joinedAt: now - 5000,
         isHostMic: false,
         isClaimingSpeaker: false,
-        stats: { totalTalkMs: 7000, bounces: 1, longestYapMs: 6200, illegibleCount: 1, tooSoftCount: 1 }
+        stats: { totalTalkMs: 0, bounces: 0, longestYapMs: 0, illegibleCount: 0, tooSoftCount: 0 }
       }
     ]);
     setRoomState({
@@ -498,7 +568,7 @@ export default function App(): JSX.Element {
           {isRecordingVoice ? "Stop host mic recording" : "Use this device as host mic"}
         </button>
         <button className="btn" onClick={claimSpeaker}>
-          I&apos;M TALKING
+          {myParticipant?.isClaimingSpeaker || activeSpeakerId === myParticipant?.id ? "STOP TALKING" : "I'M TALKING"}
         </button>
         <button className="btn" onClick={() => soundRef.current.play(soundMode)}>
           Test airhorn
@@ -525,7 +595,7 @@ export default function App(): JSX.Element {
           livePeakPct={micPeakPct}
           isSpeaking={effectiveSpeaking}
         />
-        <Leaderboard participants={participants} />
+        <Leaderboard participants={leaderboardParticipants} />
       </section>
 
       <section className="grid-two">

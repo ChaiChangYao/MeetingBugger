@@ -30,7 +30,7 @@ export const sanitizeUsername = (raw: string): string =>
 
 interface RoomRecord {
   state: RoomState;
-  claims: Map<string, number>;
+  claims: Set<string>;
 }
 
 const rooms = new Map<string, RoomRecord>();
@@ -60,7 +60,7 @@ export const getOrCreateRoom = (roomName: string): RoomRecord => {
       hostMicParticipantId: null,
       updatedAt: Date.now()
     },
-    claims: new Map()
+    claims: new Set()
   };
   rooms.set(key, record);
   return record;
@@ -130,48 +130,52 @@ export const setActiveSpeaker = (roomName: string, speakerId: string | null): Ro
   return record.state;
 };
 
-export const setClaimSpeaker = (roomName: string, socketId: string, claimMs = 5000): RoomState | null => {
+export const setClaimSpeaker = (roomName: string, socketId: string): RoomState | null => {
   const key = sanitizeRoomName(roomName);
   const record = rooms.get(key);
   if (!record) {
     return null;
   }
 
-  const expiresAt = Date.now() + claimMs;
-  record.claims.set(socketId, expiresAt);
+  record.claims.add(socketId);
   record.state.activeSpeakerId = socketId;
 
   record.state.participants = record.state.participants.map((participant) => ({
     ...participant,
-    isClaimingSpeaker: participant.id === socketId
+    isClaimingSpeaker: record.claims.has(participant.id)
+  }));
+  record.state.updatedAt = Date.now();
+  return record.state;
+};
+
+export const toggleClaimSpeaker = (roomName: string, socketId: string): RoomState | null => {
+  const key = sanitizeRoomName(roomName);
+  const record = rooms.get(key);
+  if (!record) {
+    return null;
+  }
+
+  if (record.claims.has(socketId)) {
+    record.claims.delete(socketId);
+    if (record.state.activeSpeakerId === socketId) {
+      record.state.activeSpeakerId = null;
+    }
+  } else {
+    record.claims.clear();
+    record.claims.add(socketId);
+    record.state.activeSpeakerId = socketId;
+  }
+
+  record.state.participants = record.state.participants.map((participant) => ({
+    ...participant,
+    isClaimingSpeaker: record.claims.has(participant.id)
   }));
   record.state.updatedAt = Date.now();
   return record.state;
 };
 
 export const clearExpiredClaims = (): void => {
-  const now = Date.now();
-  for (const [roomKey, record] of rooms.entries()) {
-    let changed = false;
-    for (const [id, expiresAt] of record.claims.entries()) {
-      if (expiresAt <= now) {
-        record.claims.delete(id);
-        changed = true;
-      }
-    }
-
-    if (changed) {
-      record.state.participants = record.state.participants.map((participant) => ({
-        ...participant,
-        isClaimingSpeaker: record.claims.has(participant.id)
-      }));
-      if (record.state.activeSpeakerId && !record.claims.has(record.state.activeSpeakerId)) {
-        record.state.activeSpeakerId = null;
-      }
-      record.state.updatedAt = now;
-      rooms.set(roomKey, record);
-    }
-  }
+  // Claim is now explicit toggle on/off. No TTL expiry needed.
 };
 
 export const updateParticipantStats = (

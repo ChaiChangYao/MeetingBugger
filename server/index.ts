@@ -16,6 +16,7 @@ import {
   sanitizeUsername,
   setActiveSpeaker,
   setClaimSpeaker,
+  toggleClaimSpeaker,
   setHostMic,
   updateParticipantStats
 } from "./rooms.js";
@@ -102,7 +103,15 @@ io.on("connection", (socket) => {
 
   socket.on("speaker:claim", ({ roomName }: { roomName: string }) => {
     const cleanRoom = sanitizeRoomName(roomName);
-    const state = setClaimSpeaker(cleanRoom, socket.id, 5000);
+    const state = setClaimSpeaker(cleanRoom, socket.id);
+    if (state) {
+      io.to(cleanRoom).emit("room:state", state);
+    }
+  });
+
+  socket.on("speaker:toggleClaim", ({ roomName }: { roomName: string }) => {
+    const cleanRoom = sanitizeRoomName(roomName);
+    const state = toggleClaimSpeaker(cleanRoom, socket.id);
     if (state) {
       io.to(cleanRoom).emit("room:state", state);
     }
