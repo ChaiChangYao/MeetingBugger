@@ -41,6 +41,7 @@ export default function App(): JSX.Element {
   const [micRms, setMicRms] = useState(0);
   const [micPitchHz, setMicPitchHz] = useState<number | null>(null);
   const [micSpeaking, setMicSpeaking] = useState(false);
+  const [realtimeSpeaking, setRealtimeSpeaking] = useState(false);
   const [micReady, setMicReady] = useState(false);
   const [isRecordingVoice, setIsRecordingVoice] = useState(false);
   const [meterError, setMeterError] = useState("");
@@ -63,6 +64,7 @@ export default function App(): JSX.Element {
   const lastAmbiguousResetRef = useRef(0);
   const activeSpeakerRef = useRef<string | null>(null);
   const participantsRef = useRef<Participant[]>([]);
+  const realtimeSpeechTimeoutRef = useRef<number | null>(null);
 
   const detectorRef = useRef(new ViolationDetector());
   const soundRef = useRef(createSoundController());
@@ -90,6 +92,7 @@ export default function App(): JSX.Element {
   const myParticipant = participants.find((participant) => participant.username === selfName) ?? null;
   const activeSpeakerId = roomState?.activeSpeakerId ?? null;
   const liveVolumePct = Math.min(100, Math.round((micRms / Math.max(0.006, sensitivity * 0.75)) * 100));
+  const effectiveSpeaking = micSpeaking || realtimeSpeaking;
 
   useEffect(() => {
     activeSpeakerRef.current = activeSpeakerId;
@@ -160,9 +163,23 @@ export default function App(): JSX.Element {
             }
           ].slice(-9)
         );
+      },
+      onSpeechActivity: (isSpeaking) => {
+        setRealtimeSpeaking(isSpeaking);
+        if (isSpeaking) {
+          if (realtimeSpeechTimeoutRef.current) {
+            window.clearTimeout(realtimeSpeechTimeoutRef.current);
+          }
+          realtimeSpeechTimeoutRef.current = window.setTimeout(() => {
+            setRealtimeSpeaking(false);
+          }, 1300);
+        }
       }
     });
     return () => {
+      if (realtimeSpeechTimeoutRef.current) {
+        window.clearTimeout(realtimeSpeechTimeoutRef.current);
+      }
       voiceRef.current?.disconnect();
     };
   }, []);
@@ -209,15 +226,15 @@ export default function App(): JSX.Element {
   }, []);
 
   useEffect(() => {
-    if (!micPitchHz || !micSpeaking || !activeSpeakerId) return;
+    if (!micPitchHz || !effectiveSpeaking || !activeSpeakerId) return;
     const existing = pitchProfilesRef.current[activeSpeakerId] ?? { avgHz: micPitchHz, samples: 0 };
     const nextSamples = existing.samples + 1;
     const nextAvg = (existing.avgHz * existing.samples + micPitchHz) / nextSamples;
     pitchProfilesRef.current[activeSpeakerId] = { avgHz: nextAvg, samples: nextSamples };
-  }, [activeSpeakerId, micPitchHz, micSpeaking]);
+  }, [activeSpeakerId, effectiveSpeaking, micPitchHz]);
 
   useEffect(() => {
-    if (!micPitchHz || !micSpeaking) return;
+    if (!micPitchHz || !effectiveSpeaking) return;
     const next = [...recentPitchSamplesRef.current, micPitchHz].slice(-12);
     recentPitchSamplesRef.current = next;
     if (next.length < 6) {
@@ -228,10 +245,10 @@ export default function App(): JSX.Element {
     const variance = next.reduce((sum, value) => sum + (value - avg) ** 2, 0) / next.length;
     const stdDev = Math.sqrt(variance);
     setMultipleSpeakersLikely(stdDev > 36);
-  }, [micPitchHz, micSpeaking]);
+  }, [effectiveSpeaking, micPitchHz]);
 
   useEffect(() => {
-    if (!autoSpeakerGuess || !micSpeaking || !micPitchHz || participants.length < 2) return;
+    if (!autoSpeakerGuess || !effectiveSpeaking || !micPitchHz || participants.length < 2) return;
     const now = Date.now();
     if (now - lastAutoAssignRef.current < 1200) return;
     const candidates = participants
@@ -250,15 +267,15 @@ export default function App(): JSX.Element {
     if (best.participantId === activeSpeakerId) return;
     lastAutoAssignRef.current = now;
     selectSpeaker(best.participantId);
-  }, [activeSpeakerId, autoSpeakerGuess, micPitchHz, micSpeaking, participants]);
+  }, [activeSpeakerId, autoSpeakerGuess, effectiveSpeaking, micPitchHz, participants]);
 
   useEffect(() => {
-    if (!isRecordingVoice || !micSpeaking || activeSpeakerId || !myParticipant) return;
+    if (!isRecordingVoice || !effectiveSpeaking || activeSpeakerId || !myParticipant) return;
     const now = Date.now();
     if (now - lastSelfClaimRef.current < 1200) return;
     lastSelfClaimRef.current = now;
     selectSpeaker(myParticipant.id);
-  }, [activeSpeakerId, isRecordingVoice, micSpeaking, myParticipant]);
+  }, [activeSpeakerId, effectiveSpeaking, isRecordingVoice, myParticipant]);
 
   useEffect(() => {
     if (!multipleSpeakersLikely || !activeSpeakerId) return;
@@ -282,7 +299,7 @@ export default function App(): JSX.Element {
         now: Date.now(),
         activeSpeakerId: effectiveSpeakerId,
         isSpeakerClaiming: claiming,
-        rms: micRms,
+        rms: effectiveSpeaking ? Math.max(micRms, sensitivity + 0.002) : micRms,
         transcriptText: recentTranscript
       });
       setYapProgressMs(detectorRef.current.getYapProgressMs(effectiveSpeakerId, Date.now()));
@@ -291,10 +308,10 @@ export default function App(): JSX.Element {
       fireViolation(violation.type, violation.reason, violation.speakerId);
     }, 200);
     return () => window.clearInterval(id);
-  }, [activeSpeakerId, micRms, multipleSpeakersLikely, participants, transcript]);
+  }, [activeSpeakerId, micRms, multipleSpeakersLikely, participants, transcript, effectiveSpeaking, sensitivity]);
 
   useEffect(() => {
-    if (!activeSpeakerId || micRms < sensitivity) return;
+    if (!activeSpeakerId || (!effectiveSpeaking && micRms < sensitivity)) return;
     const now = Date.now();
     if (now - statsTickRef.current < 1000) return;
     statsTickRef.current = now;
@@ -325,7 +342,7 @@ export default function App(): JSX.Element {
           : participant
       )
     );
-  }, [activeSpeakerId, micRms, participants, roomName, sensitivity, socket, yapProgressMs]);
+  }, [activeSpeakerId, micRms, participants, roomName, sensitivity, socket, yapProgressMs, effectiveSpeaking]);
 
   const fireViolation = (type: ViolationType, reason: string, participantId: string | null): void => {
     const payload: ViolationPayload = {
@@ -506,7 +523,7 @@ export default function App(): JSX.Element {
           targetMs={YAP_TARGET_MS}
           liveVolumePct={liveVolumePct}
           livePeakPct={micPeakPct}
-          isSpeaking={micSpeaking}
+          isSpeaking={effectiveSpeaking}
         />
         <Leaderboard participants={participants} />
       </section>
@@ -585,7 +602,9 @@ export default function App(): JSX.Element {
           </div>
           <p className="text-xs font-bold">Mic RMS: {micRms.toFixed(3)}</p>
           <p className="text-xs font-bold">Mic pitch: {micPitchHz ? `${Math.round(micPitchHz)} Hz` : "n/a"}</p>
-          <p className="text-xs font-bold">{micSpeaking ? "Speaking detected" : "Silence detected"}</p>
+          <p className="text-xs font-bold">
+            {effectiveSpeaking ? "Speaking detected (mic or Realtime)" : "Silence detected"}
+          </p>
           {micRms > sensitivity && !activeSpeakerId ? (
             <p className="text-xs font-bold text-red-700">Mystery Yapper detected: assign a speaker.</p>
           ) : null}

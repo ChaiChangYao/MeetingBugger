@@ -12,6 +12,7 @@ interface VoiceOptions {
   onTranscript: (text: string, lowConfidence: boolean) => void;
   muted: boolean;
   onAutoSpeakerHint?: (hint: string) => void;
+  onSpeechActivity?: (isSpeaking: boolean) => void;
 }
 
 export class RealtimeVoiceController {
@@ -87,14 +88,26 @@ export class RealtimeVoiceController {
       this.dataChannel.onmessage = (event) => {
         try {
           const payload = JSON.parse(event.data) as Record<string, unknown>;
-          const type = payload.type;
+          const type = String(payload.type ?? "");
+          if (type === "input_audio_buffer.speech_started") {
+            this.options.onSpeechActivity?.(true);
+          }
+          if (type === "input_audio_buffer.speech_stopped") {
+            this.options.onSpeechActivity?.(false);
+          }
           if (type === "response.audio_transcript.delta" || type === "response.audio_transcript.done") {
             const text = String(payload.delta ?? payload.transcript ?? "");
-            if (text) this.options.onTranscript(text, false);
+            if (text) {
+              this.options.onSpeechActivity?.(true);
+              this.options.onTranscript(text, false);
+            }
           }
           if (type === "conversation.item.input_audio_transcription.completed") {
             const text = String(payload.transcript ?? "");
-            if (text) this.options.onTranscript(text, false);
+            if (text) {
+              this.options.onSpeechActivity?.(true);
+              this.options.onTranscript(text, false);
+            }
           }
           if (type === "response.text.delta" && typeof payload.delta === "string" && payload.delta.includes("speaker")) {
             this.options.onAutoSpeakerHint?.(payload.delta);
