@@ -18,6 +18,9 @@ interface VoiceOptions {
 
 export class RealtimeVoiceController {
   private session: RealtimeSession | null = null;
+  private peerConnection: RTCPeerConnection | null = null;
+  private dataChannel: RTCDataChannel | null = null;
+  private audioEl: HTMLAudioElement | null = null;
   private fallbackMode = false;
   private options: VoiceOptions;
   private connected = false;
@@ -45,6 +48,79 @@ export class RealtimeVoiceController {
       throw new Error(`Realtime token unavailable: ${detail}`);
     }
     return (await response.json()) as RealtimeTokenResponse;
+  }
+
+  private wireLegacyDataChannel(channel: RTCDataChannel): void {
+    channel.onmessage = (event) => {
+      try {
+        const payload = JSON.parse(event.data) as Record<string, unknown>;
+        const type = String(payload.type ?? "");
+        if (type === "input_audio_buffer.speech_started") {
+          this.options.onSpeechActivity?.(true);
+        }
+        if (type === "input_audio_buffer.speech_stopped") {
+          this.options.onSpeechActivity?.(false);
+        }
+        if (type === "response.audio_transcript.delta" || type === "response.audio_transcript.done") {
+          const text = String(payload.delta ?? payload.transcript ?? "");
+          if (text) {
+            this.options.onSpeechActivity?.(true);
+            this.options.onTranscript(text, false);
+          }
+        }
+        if (type === "conversation.item.input_audio_transcription.completed") {
+          const text = String(payload.transcript ?? "");
+          if (text) {
+            this.options.onSpeechActivity?.(true);
+            this.options.onTranscript(text, false);
+          }
+        }
+      } catch {
+        // Ignore malformed data channel payloads.
+      }
+    };
+  }
+
+  private async connectViaLegacyWebRtc(token: RealtimeTokenResponse, micStream?: MediaStream): Promise<void> {
+    this.peerConnection = new RTCPeerConnection();
+    this.audioEl = document.createElement("audio");
+    this.audioEl.autoplay = true;
+    this.peerConnection.ontrack = (event) => {
+      if (!this.audioEl) return;
+      this.audioEl.srcObject = event.streams[0];
+    };
+
+    if (micStream) {
+      for (const track of micStream.getAudioTracks()) {
+        this.peerConnection.addTrack(track, micStream);
+      }
+    }
+
+    this.dataChannel = this.peerConnection.createDataChannel("oai-events");
+    this.wireLegacyDataChannel(this.dataChannel);
+
+    const model = token.model || "gpt-realtime";
+    const offer = await this.peerConnection.createOffer({
+      offerToReceiveAudio: true
+    });
+    await this.peerConnection.setLocalDescription(offer);
+
+    const response = await fetch(`https://api.openai.com/v1/realtime?model=${encodeURIComponent(model)}`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token.client_secret}`,
+        "Content-Type": "application/sdp"
+      },
+      body: offer.sdp ?? ""
+    });
+
+    const answerBody = await response.text();
+    if (!response.ok) {
+      throw new Error(`Legacy realtime SDP handshake failed: ${answerBody}`);
+    }
+    await this.peerConnection.setRemoteDescription({ type: "answer", sdp: answerBody });
+    this.connected = true;
+    this.options.onStatus(`Realtime voice connected (${model}, legacy transport)`);
   }
 
   async connect(micStream?: MediaStream): Promise<void> {
@@ -102,11 +178,19 @@ export class RealtimeVoiceController {
         // We still pass through host mic stream in app for local meter/state.
       }
 
-      await this.session.connect({
-        apiKey: token.client_secret
-      });
-      this.connected = true;
-      this.options.onStatus(`Realtime voice connected (${token.model || "gpt-realtime"})`);
+      try {
+        await this.session.connect({
+          apiKey: token.client_secret
+        });
+        this.connected = true;
+        this.options.onStatus(`Realtime voice connected (${token.model || "gpt-realtime"})`);
+      } catch (sdkError) {
+        const sdkReason = sdkError instanceof Error ? sdkError.message : "Unknown SDK realtime failure";
+        this.session?.close();
+        this.session = null;
+        this.options.onStatus(`SDK realtime failed, retrying legacy transport: ${sdkReason}`);
+        await this.connectViaLegacyWebRtc(token, micStream);
+      }
     } catch (error) {
       const reason = error instanceof Error ? error.message : "Unknown realtime failure";
       this.fallbackMode = true;
@@ -120,6 +204,19 @@ export class RealtimeVoiceController {
     }
     const line = getRandomBouncerLine(violationType);
     if (this.fallbackMode || !this.session) {
+      if (!this.fallbackMode && this.dataChannel && this.dataChannel.readyState === "open") {
+        this.dataChannel.send(
+          JSON.stringify({
+            type: "response.create",
+            response: {
+              modalities: ["audio", "text"],
+              instructions: `Say exactly one playful roast line (max 12 words): "${line}"`,
+              max_output_tokens: 40
+            }
+          })
+        );
+        return;
+      }
       const utterance = new SpeechSynthesisUtterance(line);
       utterance.rate = 1.08;
       utterance.pitch = 1.05;
@@ -132,6 +229,11 @@ export class RealtimeVoiceController {
   disconnect(): void {
     this.session?.close();
     this.session = null;
+    this.dataChannel?.close();
+    this.peerConnection?.close();
+    this.peerConnection = null;
+    this.dataChannel = null;
+    this.audioEl = null;
     this.connected = false;
   }
 }
